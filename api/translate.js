@@ -25,35 +25,31 @@ export default async function handler(req, res) {
   const { imageBase64, mimeType = 'image/jpeg', targetLang = 'Indonesian' } = req.body || {};
   if (!imageBase64) return res.status(400).json({ error: 'imageBase64 diperlukan' });
 
-  const prompt = `You are an expert manga/comic OCR and translation AI.
+  const prompt = `You are an expert manga/comic OCR and translation AI. Your job is to find EVERY speech bubble and text area in this manga page, then translate them.
 
-Analyze this manga/comic image carefully. Detect ALL text bubbles, speech bubbles, thought bubbles, sound effects, and any text overlays.
+TASK:
+1. Find ALL speech bubbles, thought bubbles, caption boxes, and sound effects
+2. For each one, give the EXACT bounding box as % of image size (top-left corner + width + height)
+3. Extract the original text exactly as written
+4. Translate naturally to: ${targetLang}
 
-For EACH text element found:
-1. Estimate its bounding box as percentage of total image dimensions (0-100)
-2. Extract the EXACT original text
-3. Translate it naturally to: ${targetLang}
+BOUNDING BOX RULES (very important):
+- xPct, yPct = top-left corner of the WHITE BUBBLE AREA (not the character, the bubble itself)
+- wPct = width of the bubble
+- hPct = height of the bubble
+- Be generous with the bounding box — make it slightly larger than the text area
+- Values must be 0-100
 
-IMPORTANT RULES:
-- Sound effects (SFX): translate/adapt them naturally (e.g. "ドン" → "DUAR!", "BOOM!")
-- Keep the tone and emotion of the original
-- For speech bubbles: preserve the character's speaking style
-- xPct/yPct = top-left corner of the bubble
-- wPct/hPct = width/height of the bubble
+TRANSLATION RULES:
+- Keep natural spoken language, preserve emotion and tone
+- Sound effects: adapt naturally (e.g. "ドン" → "DANG!", "ざわざわ" → "RAMAI...")
+- Thought bubbles: keep inner monologue style
+- DO NOT translate onomatopoeia literally, make it feel natural in ${targetLang}
 
-Respond ONLY with a valid JSON array. No markdown, no explanation, just the raw JSON:
-[
-  {
-    "xPct": 10.5,
-    "yPct": 5.2,
-    "wPct": 28.0,
-    "hPct": 12.5,
-    "original": "original text",
-    "translated": "translated text in ${targetLang}"
-  }
-]
+OUTPUT FORMAT — respond ONLY with raw JSON array, zero other text:
+[{"xPct":5.0,"yPct":3.0,"wPct":25.0,"hPct":18.0,"original":"original text here","translated":"${targetLang} translation here"}]
 
-If no text found, return exactly: []`;
+If truly no text exists: []`;
 
   try {
     const response = await fetch(GROQ_VISION_URL, {
