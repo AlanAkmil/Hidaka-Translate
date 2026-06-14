@@ -6,6 +6,7 @@
 <title>Hidaka Translate</title>
 <link href="https://fonts.googleapis.com/css2?family=Syne:wght@700;800&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 <style>
 :root {
   --bg: #080808;
@@ -578,14 +579,139 @@ async function loadImage(file) {
 }
 
 // ============================
-// TRANSLATE
+// TRANSLATE - Tesseract OCR + Groq combo
 // ============================
 async function doTranslate() {
   const lang = document.getElementById('target-lang').value;
-  showProgress(10, 'Mengirim ke AI Vision...', 'Membaca teks dalam gambar manga');
 
   try {
-    showProgress(30, 'AI menganalisis...', 'Mendeteksi speech bubble & teks');
+    // STEP 1: Tesseract OCR — dapet koordinat pixel EXACT
+    showProgress(10, 'OCR: Mendeteksi posisi teks...', 'Tesseract sedang scan gambar');
+
+    const W = state.imgElement.naturalWidth;
+    const H = state.imgElement.naturalHeight;
+
+    // Jalankan Tesseract dengan multi-lang (eng+jpn+chi_sim)
+    const worker = await Tesseract.createWorker(['eng', 'jpn', 'chi_sim'], 1, {
+      logger: m => {
+        if(m.status === 'recognizing text') {
+          const pct = Math.round(10 + m.progress * 40);
+          showProgress(pct, 'OCR: Membaca teks...', `Progress: ${Math.round(m.progress*100)}%`);
+        }
+      }
+    });
+
+    const result = await worker.recognize(state.imgElement.src);
+    await worker.terminate();
+
+    showProgress(55, 'Mengelompokkan bubble...', 'Menggabungkan blok teks yang berdekatan');
+
+    // Kumpulkan semua text blocks dari Tesseract
+    const rawBlocks = result.data.blocks || [];
+    const textBlocks = [];
+
+    for(const block of rawBlocks) {
+      const txt = (block.text || '').trim();
+      if(!txt || txt.length < 2) continue;
+
+      // Konversi koordinat pixel ke persentase
+      const bbox = block.bbox;
+      const pad = 6; // padding sedikit biar teks ketutup sempurna
+      textBlocks.push({
+        x: Math.max(0, bbox.x0 - pad),
+        y: Math.max(0, bbox.y0 - pad),
+        w: Math.min(W, bbox.x1 - bbox.x0 + pad*2),
+        h: Math.min(H, bbox.y1 - bbox.y0 + pad*2),
+        xPct: Math.max(0, (bbox.x0 - pad) / W * 100),
+        yPct: Math.max(0, (bbox.y0 - pad) / H * 100),
+        wPct: Math.min(100, (bbox.x1 - bbox.x0 + pad*2) / W * 100),
+        hPct: Math.min(100, (bbox.y1 - bbox.y0 + pad*2) / H * 100),
+        original: txt,
+        translated: ''
+      });
+    }
+
+    if(textBlocks.length === 0) {
+      // Fallback ke Groq Vision kalau Tesseract gagal deteksi
+      notify('OCR tidak menemukan teks, fallback ke AI Vision...', 'info');
+      await doTranslateFallback(lang);
+      return;
+    }
+
+    showProgress(60, 'Menerjemahkan teks...', `${textBlocks.length} blok teks ditemukan`);
+
+    // STEP 2: Kirim semua teks ke Groq untuk terjemahan sekaligus
+    const textsToTranslate = textBlocks.map((b, i) => `[${i}] ${b.original}`).join('\n');
+
+    const res = await fetch(BACKEND + '/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        messages: [
+          {
+            role: 'system',
+            content: `You are a manga/comic translator. Translate each numbered text to ${lang}. 
+Keep the same numbering format [0], [1], etc.
+Rules:
+- Keep translations short and natural (same length as original when possible)
+- Sound effects: adapt naturally (ドン→DANG!, ざわ→MURMUR...)
+- Preserve emotion and speaking style
+- Return ONLY the numbered translations, nothing else`
+          },
+          {
+            role: 'user',
+            content: `Translate these manga texts to ${lang}:\n${textsToTranslate}`
+          }
+        ],
+        superMode: false
+      })
+    });
+
+    showProgress(85, 'Memproses terjemahan...', 'Menerapkan hasil ke gambar');
+
+    const data = await res.json();
+    if(!res.ok) throw new Error(data.error || 'Translate gagal');
+
+    // Parse hasil terjemahan berdasarkan numbering [0], [1], ...
+    const translatedContent = data.content || '';
+    const lines = translatedContent.split('\n');
+
+    for(const line of lines) {
+      const match = line.match(/^\[(\d+)\]\s*(.+)/);
+      if(match) {
+        const idx = parseInt(match[1]);
+        const translated = match[2].trim();
+        if(textBlocks[idx]) {
+          textBlocks[idx].translated = translated;
+        }
+      }
+    }
+
+    // Isi yang kosong dengan original kalau gagal parse
+    textBlocks.forEach(b => { if(!b.translated) b.translated = b.original; });
+
+    state.bubbles = textBlocks;
+    showProgress(95, 'Merender gambar...', 'Menempelkan terjemahan ke posisi bubble');
+
+    renderBubbleList();
+    await renderCanvas();
+    hideProgress();
+
+    notify(`✨ ${state.bubbles.length} teks berhasil diterjemahkan!`, 'success');
+
+  } catch(err) {
+    hideProgress();
+    console.error(err);
+    // Fallback ke Groq Vision
+    notify('OCR error, mencoba AI Vision...', 'warning');
+    await doTranslateFallback(lang);
+  }
+}
+
+// Fallback: pakai Groq Vision langsung (koordinat persentase)
+async function doTranslateFallback(lang) {
+  try {
+    showProgress(20, 'AI Vision menganalisis...', 'Mendeteksi bubble & teks');
 
     const res = await fetch(BACKEND + '/api/translate', {
       method: 'POST',
@@ -597,28 +723,30 @@ async function doTranslate() {
       })
     });
 
-    showProgress(75, 'Memproses hasil...', 'Menyiapkan overlay teks');
+    showProgress(80, 'Memproses...', 'Menerapkan ke gambar');
     const data = await res.json();
     if(!res.ok) throw new Error(data.error || 'Translate gagal');
 
-    state.bubbles = data.bubbles || [];
-    showProgress(95, 'Merender...', 'Menerapkan terjemahan ke gambar');
+    state.bubbles = (data.bubbles || []).map(b => ({
+      ...b,
+      x: (b.xPct/100) * state.imgElement.naturalWidth,
+      y: (b.yPct/100) * state.imgElement.naturalHeight,
+      w: (b.wPct/100) * state.imgElement.naturalWidth,
+      h: (b.hPct/100) * state.imgElement.naturalHeight,
+    }));
 
     renderBubbleList();
     await renderCanvas();
-
     hideProgress();
 
     if(state.bubbles.length === 0) {
-      notify('Tidak ada teks terdeteksi dalam gambar ini', 'info');
+      notify('Tidak ada teks terdeteksi', 'info');
     } else {
-      notify(`✨ ${state.bubbles.length} bubble berhasil diterjemahkan!`, 'success');
+      notify(`✨ ${state.bubbles.length} bubble diterjemahkan (AI Vision)`, 'success');
     }
-
   } catch(err) {
     hideProgress();
     notify('Error: ' + err.message, 'error');
-    console.error(err);
   }
 }
 
