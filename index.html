@@ -659,28 +659,72 @@ async function renderCanvas() {
   const fontSize = parseInt(document.getElementById('font-size').value) || 14;
   const textColorMode = document.getElementById('text-color').value;
 
+  // Deteksi apakah manga hitam putih (kebanyakan pixel terang)
+  const isMangaBW = detectMangaBW(ctx, W, H);
+
   for(const b of state.bubbles) {
     if(!b.translated) continue;
     const x = (b.xPct/100)*W, y = (b.yPct/100)*H;
     const w = (b.wPct/100)*W, h = (b.hPct/100)*H;
 
-    // Sample bg color
-    const bgColor = sampleBg(ctx, x, y, w, h, W, H);
-    const brightness = getBrightness(bgColor);
-    const textColor = textColorMode === 'auto'
-      ? (brightness > 128 ? '#111111' : '#f5f5f5')
-      : textColorMode;
+    // Untuk manga BW, selalu pakai putih. Untuk berwarna, sample warna dominan
+    let bgColor, textColor;
+    if(isMangaBW) {
+      // Sample pojok atas bubble untuk deteksi bg (biasanya putih/hitam)
+      const cornerBg = sampleCorner(ctx, x, y, w, h, W, H);
+      const br = getBrightness(cornerBg);
+      bgColor = br > 100 ? '#ffffff' : '#111111';
+      textColor = br > 100 ? '#111111' : '#ffffff';
+    } else {
+      bgColor = sampleBg(ctx, x, y, w, h, W, H);
+      const br = getBrightness(bgColor);
+      textColor = textColorMode === 'auto'
+        ? (br > 128 ? '#111111' : '#f5f5f5')
+        : textColorMode;
+    }
 
-    // Fill bubble
+    if(textColorMode !== 'auto') textColor = textColorMode;
+
+    // Inpaint: fill area bubble dengan solid bg
     ctx.save();
     ctx.fillStyle = bgColor;
-    roundRect(ctx, x + 1, y + 1, w - 2, h - 2, Math.min(w,h)*0.1);
-    ctx.fill();
+    // Fill penuh tanpa rounded agar teks asli benar-benar tertutup
+    ctx.fillRect(x, y, w, h);
     ctx.restore();
 
-    // Draw text
-    drawWrappedText(ctx, b.translated, x, y, w, h, fontSize, textColor);
+    // Draw teks terjemahan
+    drawWrappedText(ctx, b.translated, x, y, w, h, fontSize, textColor, isMangaBW);
   }
+}
+
+// Deteksi manga hitam putih: >70% pixel dengan brightness >200
+function detectMangaBW(ctx, W, H) {
+  try {
+    const sample = ctx.getImageData(0, 0, Math.min(W, 200), Math.min(H, 200)).data;
+    let bright = 0, total = 0;
+    for(let i = 0; i < sample.length; i += 4) {
+      const br = (sample[i]*299 + sample[i+1]*587 + sample[i+2]*114) / 1000;
+      if(br > 180) bright++;
+      total++;
+    }
+    return (bright / total) > 0.45; // >45% pixel terang = manga BW
+  } catch { return true; }
+}
+
+// Sample pojok dalam bubble (area kecil di sudut kiri atas dalam)
+function sampleCorner(ctx, x, y, w, h, W, H) {
+  try {
+    const px = Math.max(1, Math.round(x + w * 0.08));
+    const py = Math.max(1, Math.round(y + h * 0.08));
+    const pw = Math.min(Math.round(w * 0.15), W - px - 1);
+    const ph = Math.min(Math.round(h * 0.15), H - py - 1);
+    if(pw < 1 || ph < 1) return '#ffffff';
+    const d = ctx.getImageData(px, py, pw, ph).data;
+    let r=0,g=0,b=0,n=0;
+    for(let i=0;i<d.length;i+=4){r+=d[i];g+=d[i+1];b+=d[i+2];n++}
+    if(!n) return '#ffffff';
+    return `rgb(${Math.round(r/n)},${Math.round(g/n)},${Math.round(b/n)})`;
+  } catch { return '#ffffff'; }
 }
 
 function sampleBg(ctx, x, y, w, h, W, H) {
@@ -704,34 +748,49 @@ function getBrightness(color) {
   return (parseInt(m[0])*299 + parseInt(m[1])*587 + parseInt(m[2])*114) / 1000;
 }
 
-function drawWrappedText(ctx, text, x, y, w, h, fontSize, color) {
-  const pad = Math.min(w,h) * 0.07 + 3;
-  const maxW = w - pad*2;
-  const lh = fontSize * 1.35;
+function drawWrappedText(ctx, text, x, y, w, h, fontSize, color, isBW) {
+  const pad = Math.max(6, Math.min(w, h) * 0.08);
+  const maxW = w - pad * 2;
+  const lh = fontSize * 1.3;
 
-  ctx.font = `bold ${fontSize}px Arial, sans-serif`;
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
+  // Auto-shrink font kalau teks terlalu panjang
+  let fs = fontSize;
+  ctx.font = `bold ${fs}px "Arial", sans-serif`;
 
   const words = text.split(' ');
+  let lines = wrapWords(ctx, words, maxW);
+
+  // Kalau teks overflow tinggi bubble, kecilkan font
+  while(lines.length * lh > h - pad * 2 && fs > 8) {
+    fs -= 1;
+    ctx.font = `bold ${fs}px "Arial", sans-serif`;
+    lines = wrapWords(ctx, words, maxW);
+  }
+
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = color;
+  ctx.shadowBlur = 0;
+
+  const totalH = lines.length * lh;
+  const startY = y + (h - totalH) / 2 + lh / 2;
+
+  lines.forEach((line, i) => {
+    ctx.fillText(line, x + w / 2, startY + i * lh, maxW);
+  });
+}
+
+function wrapWords(ctx, words, maxW) {
   const lines = [];
   let cur = '';
   for(const word of words) {
     const test = cur ? cur + ' ' + word : word;
-    if(ctx.measureText(test).width > maxW && cur) { lines.push(cur); cur = word; }
-    else cur = test;
+    if(ctx.measureText(test).width > maxW && cur) {
+      lines.push(cur); cur = word;
+    } else cur = test;
   }
   if(cur) lines.push(cur);
-
-  const totalH = lines.length * lh;
-  const startY = y + (h - totalH)/2 + lh/2;
-
-  // Shadow for readability
-  ctx.shadowColor = color === '#111111' ? 'rgba(255,255,255,0.85)' : 'rgba(0,0,0,0.8)';
-  ctx.shadowBlur = 2;
-  ctx.fillStyle = color;
-  lines.forEach((line, i) => ctx.fillText(line, x + w/2, startY + i*lh, maxW));
-  ctx.shadowBlur = 0;
+  return lines;
 }
 
 function roundRect(ctx, x, y, w, h, r) {
