@@ -3,7 +3,12 @@
   "version": "1.0.0",
   "description": "Debug & bypass scan-translator.com — unlimited translation",
   "main": "api/debug.js",
+  "type": "module",
   "scripts": {
     "start": "vercel dev"
+  },
+  "dependencies": {
+    "node-fetch": "^3.3.2",
+    "form-data": "^4.0.0"
   }
 }
