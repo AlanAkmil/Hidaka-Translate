@@ -2,6 +2,14 @@ import fetch from 'node-fetch';
 import FormData from 'form-data';
 import fs from 'fs';
 import crypto from 'crypto';
+import { formidable } from 'formidable';
+
+// Vercel: matiin body parser bawaan biar formidable bisa baca stream multipart mentah
+export const config = {
+    api: {
+        bodyParser: false
+    }
+};
 
 // ============ KONFIGURASI REAL ============
 const SCAN_TRANSLATOR_API = 'https://scan-translator.com/api/translate';
@@ -79,19 +87,22 @@ export default async function handler(req, res) {
     }
 
     try {
-        // Ambil file dari form-data
-        const formData = await req.formData();
-        const image = formData.get('image');
-        const sourceLang = formData.get('source') || 'ko';
-        const targetLang = formData.get('target') || 'id';
-        const mode = formData.get('mode') || 'auto';
+        // Ambil file dari form-data (pake formidable, bukan req.formData() —
+        // itu Web API, gak ada di Node serverless function-nya Vercel)
+        const form = formidable({ multiples: false });
+        const [fields, files] = await form.parse(req);
+
+        const sourceLang = fields.source?.[0] || 'ko';
+        const targetLang = fields.target?.[0] || 'id';
+        const mode = fields.mode?.[0] || 'auto';
+        const image = files.image?.[0];
 
         if (!image) {
             return res.status(400).json({ success: false, message: 'No image uploaded' });
         }
 
-        // Baca buffer
-        const buffer = Buffer.from(await image.arrayBuffer());
+        // Baca buffer dari temp file yang ditulis formidable
+        const buffer = await fs.promises.readFile(image.filepath);
         const imageHash = generateImageHash(buffer);
         const cacheKey = `${imageHash}:${targetLang}`;
 
