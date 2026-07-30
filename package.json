@@ -1,0 +1,9 @@
+{
+  "name": "scan-translator-debug",
+  "version": "1.0.0",
+  "description": "Debug & bypass scan-translator.com — unlimited translation",
+  "main": "api/debug.js",
+  "scripts": {
+    "start": "vercel dev"
+  }
+}
